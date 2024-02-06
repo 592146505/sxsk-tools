@@ -150,6 +150,9 @@ func Exec(codes []string) {
 	if len(jobs) > 0 {
 		// 排序
 		sort.Slice(jobs, func(i, j int) bool {
+			if jobs[i].GetRatio() == jobs[j].GetRatio() {
+				return strings.Compare(jobs[i].Code, jobs[j].Code) < 0
+			}
 			return jobs[i].GetRatio() > jobs[j].GetRatio()
 		})
 		t := table.Table{}
