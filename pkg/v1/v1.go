@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/PuerkitoBio/goquery"
-	"github.com/jedib0t/go-pretty/v6/table"
 	"io"
 	"net/http"
 	"sort"
@@ -13,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/PuerkitoBio/goquery"
+	"github.com/jedib0t/go-pretty/v6/table"
 )
 
 var client *http.Client
@@ -30,8 +31,7 @@ func getHTTPClient() *http.Client {
 	return client
 }
 
-func makeRequest(url string, param *QueryParam, wg *sync.WaitGroup) (*QueryResp, error) {
-	defer wg.Done()
+func makeRequest(url string, param *QueryParam) (*QueryResp, error) {
 
 	req, err := http.NewRequest("POST", url, strings.NewReader(param.ToReqParam().Encode()))
 	if err != nil {
@@ -90,27 +90,20 @@ func parseHtml(html string) (*JobDetail, error) {
 			switch {
 			case tb == "地市":
 				job.City = value
-				break
 			case tb == "用人单位":
 				job.Department = value
-				break
 			case tb == "招考职位":
 				job.JobName = value
-				break
 			case tb == "职位代码":
 				job.Code = value
-				break
 			case tb == "招考人数":
 				num, _ := strconv.Atoi(strings.TrimSuffix(value, "人"))
 				job.RecruitsNumber = num
-				break
 			case tb == "学历":
 				job.Educational = value
-				break
 			case tb == "报名人数":
 				num, _ := strconv.Atoi(strings.TrimSuffix(value, "人"))
 				job.ApplicantsNumber = num
-				break
 			}
 		}
 	})
@@ -122,31 +115,63 @@ func parseHtml(html string) (*JobDetail, error) {
 
 func Exec(codes []string) {
 	url := "https://sn.huatu.com/zt/2024skbmrscx/app/executor.php"
+	relustChan := make(chan *JobDetail, len(codes))
+	errChan := make(chan error, len(codes))
+
+	// 使用 WaitGroup 来等待所有 goroutine 完成
 	var wg sync.WaitGroup
-	errCodes := make(map[string]error)
-	var jobs []*JobDetail
+
+	// 限制并发数为5
+	sem := make(chan struct{}, 5)
+
 	for _, code := range codes {
 		wg.Add(1)
-		code := code
-		go func() {
-			data, err := makeRequest(url, &QueryParam{
-				Code: code,
-			}, &wg)
-			// 失败
-			if err != nil {
-				errCodes[code] = err
-			} else {
-				job, err := parseHtml(data.Str)
-				if err != nil {
-					errCodes[code] = err
-				} else {
-					jobs = append(jobs, job)
-				}
-			}
-		}()
-	}
-	wg.Wait()
+		go func(jobCode string) {
+			defer wg.Done()
 
+			// 获取信号量
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			data, err := makeRequest(url, &QueryParam{
+				Code: jobCode,
+			})
+			if err != nil {
+				errChan <- fmt.Errorf("请求失败: %v", err)
+				return
+			}
+			job, err := parseHtml(data.Str)
+			if err != nil {
+				errChan <- fmt.Errorf("解析失败: %v", err)
+			} else {
+				relustChan <- job
+			}
+		}(code)
+	}
+
+	// 等待所有请求完成后再关闭通道
+	go func() {
+		// 这里使用goroutine等待是因为:
+		// 1. 主线程需要立即开始从channel中读取数据,如果在主线程中等待会导致死锁
+		// 2. 所有worker goroutine完成后才能关闭channel,否则可能导致panic
+		// 3. 使用goroutine可以让主线程继续执行后续的结果处理逻辑
+		wg.Wait()
+		close(relustChan)
+		close(errChan)
+	}()
+
+	errCodes := make(map[string]error)
+	var jobs []*JobDetail
+
+	// 收集结果
+	for job := range relustChan {
+		jobs = append(jobs, job)
+	}
+	for err := range errChan {
+		errCodes[codes[len(errCodes)]] = err
+	}
+
+	// 输出结果
 	if len(jobs) > 0 {
 		// 排序
 		sort.Slice(jobs, func(i, j int) bool {
@@ -155,25 +180,31 @@ func Exec(codes []string) {
 			}
 			return jobs[i].GetRatio() > jobs[j].GetRatio()
 		})
+
 		t := table.Table{}
-		header := table.Row{"职位代码", "地市", "用人单位", "招考职位", "招考人数", "学历", "报名人数", "比值"}
-		t.AppendHeader(header)
+		t.AppendHeader(table.Row{"职位代码", "地市", "用人单位", "招考职位", "招考人数", "学历", "报名人数", "比值"})
+
 		for _, job := range jobs {
-			row := table.Row{job.Code, job.City, job.Department, job.JobName, job.RecruitsNumber, job.Educational, job.ApplicantsNumber, fmt.Sprintf("%.2f%%", job.GetRatio()*100)}
-			t.AppendRow(row)
+			t.AppendRow(table.Row{
+				job.Code,
+				job.City,
+				job.Department,
+				job.JobName,
+				job.RecruitsNumber,
+				job.Educational,
+				job.ApplicantsNumber,
+				fmt.Sprintf("%.2f%%", job.GetRatio()*100),
+			})
 		}
 		fmt.Println(t.Render())
 	}
 
 	if len(errCodes) > 0 {
 		t := table.Table{}
-		header := table.Row{"职位代码", "错误信息"}
-		t.AppendHeader(header)
+		t.AppendHeader(table.Row{"职位代码", "错误信息"})
 		for code, err := range errCodes {
-			row := table.Row{code, err}
-			t.AppendRow(row)
+			t.AppendRow(table.Row{code, err})
 		}
 		fmt.Println(t.Render())
 	}
-
 }
