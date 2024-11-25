@@ -39,7 +39,6 @@ type JobDetail struct {
 	Educational      string
 	Remark           string
 	ApplicantsNumber int
-	ratio            float64
 }
 
 func (d *JobDetail) GetRatio() float64 {
@@ -47,4 +46,24 @@ func (d *JobDetail) GetRatio() float64 {
 		return 0
 	}
 	return float64(d.RecruitsNumber) / float64(d.ApplicantsNumber)
+}
+
+type Result struct {
+	Err       error
+	JobCode   string
+	JobDetail *JobDetail
+}
+
+func ResultSuccess(jobCode string, jobDetail *JobDetail) *Result {
+	return &Result{
+		JobCode:   jobCode,
+		JobDetail: jobDetail,
+	}
+}
+
+func ResultError(jobCode string, err error) *Result {
+	return &Result{
+		JobCode: jobCode,
+		Err:     err,
+	}
 }

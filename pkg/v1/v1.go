@@ -52,7 +52,7 @@ func makeRequest(url string, param *QueryParam) (*QueryResp, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, err
+		return nil, fmt.Errorf("HTTP 请求失败，状态码：%d", resp.StatusCode)
 	}
 
 	// 读取响应体
@@ -115,8 +115,7 @@ func parseHtml(html string) (*JobDetail, error) {
 
 func Exec(codes []string) {
 	url := "https://sn.huatu.com/zt/2024skbmrscx/app/executor.php"
-	relustChan := make(chan *JobDetail, len(codes))
-	errChan := make(chan error, len(codes))
+	relustChan := make(chan *Result, len(codes))
 
 	// 使用 WaitGroup 来等待所有 goroutine 完成
 	var wg sync.WaitGroup
@@ -137,14 +136,14 @@ func Exec(codes []string) {
 				Code: jobCode,
 			})
 			if err != nil {
-				errChan <- fmt.Errorf("请求失败: %v", err)
+				relustChan <- ResultError(jobCode, fmt.Errorf("请求失败: %v", err))
 				return
 			}
 			job, err := parseHtml(data.Str)
 			if err != nil {
-				errChan <- fmt.Errorf("解析失败: %v", err)
+				relustChan <- ResultError(jobCode, fmt.Errorf("解析失败: %v", err))
 			} else {
-				relustChan <- job
+				relustChan <- ResultSuccess(jobCode, job)
 			}
 		}(code)
 	}
@@ -157,18 +156,18 @@ func Exec(codes []string) {
 		// 3. 使用goroutine可以让主线程继续执行后续的结果处理逻辑
 		wg.Wait()
 		close(relustChan)
-		close(errChan)
 	}()
 
 	errCodes := make(map[string]error)
 	var jobs []*JobDetail
 
 	// 收集结果
-	for job := range relustChan {
-		jobs = append(jobs, job)
-	}
-	for err := range errChan {
-		errCodes[codes[len(errCodes)]] = err
+	for result := range relustChan {
+		if result.Err != nil {
+			errCodes[result.JobCode] = result.Err
+		} else {
+			jobs = append(jobs, result.JobDetail)
+		}
 	}
 
 	// 输出结果
